@@ -1,12 +1,14 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE FlexibleInstances #-}
 module Main where
 
-import Control.Monad (forM_)
+import Control.Monad (forM)
 import qualified Criterion.Measurement as CM
 import qualified Criterion.Measurement.Types as CMT
 import System.Environment
 
 import Data.Array.Accelerate (Acc, Vector, Matrix, Arrays)
+import qualified Data.Array.Accelerate as A
 import qualified Data.Array.Accelerate.Interpreter as I
 import qualified Data.Array.Accelerate.LLVM.Native as CPU
 import qualified Data.Array.Accelerate.LLVM.PTX as GPU
@@ -20,33 +22,72 @@ import M4 (withoutExpTemps)
 import M4a (selectiveRecompute1)
 import M4b (selectiveRecompute2)
 import M4N (withoutExpTempsN)
+import Types
 
 
-type Program = Acc GMMIn -> Acc (Vector Float, Matrix Float, Matrix Float)
+data Similarity
+  = Similarity { simMaxAbsDiff :: Float
+               , simMaxRelDiff :: Float
+               , simMaxAbsVal :: Float
+               , simTotal :: Float
+               , simNumVals :: Int
+               , simAverage :: Float }   -- recomputed every time from Total and NumVals
+  deriving (Show)
+
+instance Semigroup Similarity where
+  Similarity mad mrd mav tot nv _ <> Similarity mad' mrd' mav' tot' nv' _ =
+    Similarity (max mad mad') (max mrd mrd')
+               (max mav mav') (tot + tot') (nv + nv')
+               ((tot + tot') / fromIntegral (nv + nv'))
+
+class Similar a where
+  similarityReport :: a -> a -> Similarity
+
+instance Similar [Float] where
+  similarityReport l1 l2 =
+    let absdiff x y = abs (x - y)
+        reldiff x y = max ((x - y) / y) ((y - x) / x)
+        total = sum (map abs l1) + sum (map abs l2)
+        numvals = length l1 + length l2
+    in Similarity { simMaxAbsDiff = maximum (zipWith absdiff l1 l2)
+                  , simMaxRelDiff = maximum (zipWith reldiff l1 l2)
+                  , simMaxAbsVal = max (maximum l1) (maximum l2)
+                  , simTotal = total
+                  , simNumVals = numvals
+                  , simAverage = total / fromIntegral numvals }
+
+instance A.Shape sh => Similar (A.Array sh Float) where
+  similarityReport a1 a2 = similarityReport (A.toList a1) (A.toList a2)
+
+instance (Similar a, Similar b, Similar c) => Similar (a, b, c) where
+  similarityReport (a, b, c) (x, y, z) =
+    similarityReport a x <> similarityReport b y <> similarityReport c z
+
+
+type Output = (Vector Float, Matrix Float, Matrix Float)
+type Program = Acc GMMIn -> Acc Output
 
 data TimeResult = TimeResult { tmCompile :: Double
                              , tmCompute :: Double }
   deriving (Show)
 
-data Backend = Interpreter | CPU | GPU
-  deriving (Show)
-
-run1For :: (Arrays a, Arrays b) => Backend -> (Acc a -> Acc b) -> a -> b
+run1For :: (Arrays a, Arrays b) => BackendKind -> (Acc a -> Acc b) -> a -> b
 run1For Interpreter = I.run1
 run1For CPU = CPU.run1
 run1For GPU = GPU.run1
 
-timeRun :: Options -> Program -> GMMIn -> IO TimeResult
+timeRun :: Options -> Program -> GMMIn -> IO (TimeResult, Output)
 timeRun options prog input = do
     debugLn options "Compiling..."
     let compiled = run1For (optBackend options) prog
     debugLn options "Timing compilation force..."
     tm1 <- CMT.measTime . fst <$> CM.measure (CMT.whnf (`seq` ()) compiled) 1
     debugLn options "Timing apply force..."
-    tm2 <- CMT.measTime . fst <$> CM.measure (CMT.nf compiled input) 1
-    return (TimeResult tm1 tm2)
+    let output = compiled input
+    tm2 <- CMT.measTime . fst <$> CM.measure (CMT.whnf (`seq` ()) output) 1
+    return (TimeResult tm1 tm2, output)
 
-data Options = Options { optBackend :: Backend
+data Options = Options { optBackend :: BackendKind
                        , optDebug :: Bool }
   deriving (Show)
 
@@ -69,7 +110,7 @@ main = do
     options <- foldr parseOption defaultOptions <$> getArgs
 
     let programs :: [Program]
-        programs = 
+        programs =
             [inputProgram
             ,withDefaultBackpermute
             ,simplified
@@ -85,6 +126,10 @@ main = do
     -- I've only tested with the 1k and 10k directories.
     input <- readInstance "gmm_1k_d32_K25.txt"
 
-    forM_ (zip [1::Int ..] programs) $ \(i, prog) -> do
+    outs <- forM (zip [1::Int ..] programs) $ \(i, prog) -> do
         debugLn options ("Running program " ++ show i)
-        timeRun options prog input >>= print
+        (tm, out) <- timeRun options prog input
+        print tm
+        return out
+
+    mapM_ (print . similarityReport (head outs)) (tail outs)

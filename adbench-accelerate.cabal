@@ -5,7 +5,7 @@ author:              Tom Smeding
 maintainer:          tom.smeding@gmail.com
 build-type:          Simple
 
-executable adbench-accelerate-gmm
+executable adbench-accelerate
   main-is:             Main.hs
   other-modules:       GMMIO,
                        M1, M2, M3, M4, M4a, M4b, M1N, M4N,
@@ -21,4 +21,4 @@ executable adbench-accelerate-gmm
                        bytestring-lexing >= 0.5.0.2 && < 0.6
   hs-source-dirs:      src
   default-language:    Haskell2010
-  ghc-options:         -Wall -O2 -threaded -rtsopts
+  ghc-options:         -Wall -g -debug -threaded -rtsopts
